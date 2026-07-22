@@ -88,6 +88,53 @@ class TestSliceInference:
         assert isinstance(seg, np.ndarray)
         assert np.asarray(seg).shape == expected_shape
 
+    def test_roi_slice_from_labels_layer(self, image_2d):
+        """Confine-to-ROI helpers should crop/mask from a Labels layer."""
+        viewer = ViewerModel()
+        image_layer = viewer.add_image(image_2d)
+        labels = np.zeros(image_2d.shape, dtype=np.int32)
+        labels[10:25, 15:40] = 1
+        labels[50:60, 50:55] = 2
+        labels_layer = viewer.add_labels(labels)
+
+        widget = SliceInferenceWidget(
+            viewer=viewer,
+            image_layer=image_layer,
+            model_config=MODEL_NAMES['MitoNet_mini'],
+            confine_to_roi=True,
+            roi_layer=labels_layer,
+        )
+
+        resolved = widget._resolve_roi_layer()
+        assert resolved is labels_layer
+
+        roi, min_y, min_x, max_y, max_x, mask = widget._get_roi_slice(image_layer, labels_layer)
+        assert (min_y, min_x, max_y, max_x) == (10, 15, 60, 55)
+        assert roi.shape == (50, 40)
+        assert mask.shape == roi.shape
+        # crop origin (10, 15) is inside label 1
+        assert mask[0, 0]
+        # image coordinate (30, 50) is between the two cells
+        assert not mask[20, 35]
+
+    def test_roi_prefers_shapes_over_labels(self, image_2d):
+        viewer = ViewerModel()
+        image_layer = viewer.add_image(image_2d)
+        labels = np.zeros(image_2d.shape, dtype=np.int32)
+        labels[10:25, 15:40] = 1
+        labels_layer = viewer.add_labels(labels)
+        triangle = np.array([[11, 13], [30, 6], [30, 20]])
+        shapes_layer = viewer.add_shapes(triangle, shape_type="polygon", edge_width=5)
+
+        widget = SliceInferenceWidget(
+            viewer=viewer,
+            image_layer=image_layer,
+            model_config=MODEL_NAMES['MitoNet_mini'],
+            confine_to_roi=True,
+            roi_layer=labels_layer,
+        )
+        assert widget._resolve_roi_layer() is shapes_layer
+
 
     @pytest.mark.slow
     @pytest.mark.parametrize(("test_args", "expected_labels"), gen_slice_dset_params(), #list(zip(slice_test_args, expect_results)),
