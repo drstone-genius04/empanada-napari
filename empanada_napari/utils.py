@@ -47,7 +47,8 @@ def no_ssl_verification():
 __all__ = [
     'abspath'
     'get_configs',
-    'Preprocessor'
+    'Preprocessor',
+    'enable_layer_rename_refresh'
 ]
 
 MODEL_DIR = os.path.join(os.path.expanduser('~'), '.empanada')
@@ -166,6 +167,70 @@ def add_new_model(
     # save the config file to .empanada
     with open(os.path.join(config_dir, f'{model_name}.yaml'), mode='w') as f:
         yaml.dump(config, f)
+
+def enable_layer_rename_refresh(gui, viewer=None):
+    r"""Keep a magicgui widget's Layer dropdowns in sync when a layer is renamed.
+
+    napari only refreshes a magicgui ComboBox's layer choices when layers are
+    inserted, removed, or reordered (see ``napari._qt.qt_main_window``); it does
+    *not* do so when an existing layer's ``name`` changes. Without this, any
+    dropdown showing layer names (e.g. "Labels layer") goes stale after a rename,
+    until the plugin widget is closed and reopened.
+
+    This attaches a listener to every current (and future) layer's
+    ``events.name`` signal that refreshes all of ``gui``'s dropdown ("categorical")
+    sub-widgets, so renamed layers show up immediately.
+
+    Args:
+        gui: A magicgui ``FunctionGui``, i.e. the object returned by an
+            ``@magicgui``-decorated widget factory.
+        viewer: Optional. If given, watches this viewer's layers directly
+            (mainly useful for testing without a docked Qt widget). Otherwise,
+            the viewer is resolved lazily via ``gui``'s own auto-injected
+            ``viewer`` parameter, mirroring how napari resolves it elsewhere.
+
+    Returns:
+        The same ``gui`` object, for convenience chaining.
+
+    """
+    watched_layer_ids = set()
+    watched_viewer_ids = set()
+
+    def _refresh_choices(*_):
+        for child in gui:
+            if hasattr(child, 'reset_choices'):
+                child.reset_choices()
+
+    def _watch_layer(layer):
+        if id(layer) not in watched_layer_ids:
+            watched_layer_ids.add(id(layer))
+            layer.events.name.connect(_refresh_choices)
+
+    def _watch_viewer(v):
+        if v is None or id(v) in watched_viewer_ids:
+            return
+        watched_viewer_ids.add(id(v))
+
+        for layer in v.layers:
+            _watch_layer(layer)
+
+        def _on_inserted(event):
+            _watch_layer(event.value)
+            _refresh_choices()
+
+        v.layers.events.inserted.connect(_on_inserted)
+
+    if viewer is not None:
+        _watch_viewer(viewer)
+        return gui
+
+    def _try_watch(*_):
+        viewer_widget = getattr(gui, 'viewer', None)
+        _watch_viewer(viewer_widget.value if viewer_widget is not None else None)
+
+    gui.native_parent_changed.connect(_try_watch)
+    _try_watch()
+    return gui
 
 def normalize(img, mean, std, max_pixel_value=255.0):
     mean = np.array(mean, dtype=np.float32)

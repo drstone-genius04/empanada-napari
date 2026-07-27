@@ -6,7 +6,8 @@ from skimage.draw import polygon
 
 from empanada.config_loaders import read_yaml
 from empanada_napari.inference import Engine2d
-from empanada_napari.utils import get_configs, abspath
+from empanada_napari.utils import get_configs, abspath, enable_layer_rename_refresh
+from empanada.array_utils import take
 
 from napari import Viewer
 from napari.layers import Image, Labels, Shapes
@@ -117,7 +118,12 @@ class SliceInferenceWidget:
                 test_worker.start()
 
             case True, False:# For testing batch slice inference
-                seg, axis, plane, y, x = self._run_model_batch(self.engine, self.image_layer.data, self.fill_holes)
+                result = self._run_model_batch(self.engine, self.image_layer.data, self.fill_holes)
+                if self.image_layer.data.ndim == 2:
+                    seg, axis, plane, y, x = result
+                else:
+                    # 3D stack: _run_model_batch returns just the segmented stack
+                    seg, axis, plane, y, x = result, None, None, None, None
                 return seg, axis, plane, y, x
             
             case False, True:
@@ -417,16 +423,19 @@ class SliceInferenceWidget:
         return seg, axis, plane, y, x
 
     def _run_model_batch(self, engine, image, fill_holes):
-        # axis is always xy
-        axis = 0
-
         # create the inference engine
         if image.ndim == 3:
-            print(f'Running batch mode inference on {len(image)} images.')
+            # Slice along whichever axis is currently being viewed (xy, xz, or yz),
+            # instead of always assuming the array's first axis is xy.
+            axis = self.viewer.dims.order[0] if self.viewer is not None else 0
+            n_slices = image.shape[axis]
+            print(f'Running batch mode inference on {n_slices} images along axis {axis}.')
             segmentations = []
-            for plane, img_slice in tqdm(enumerate(image), total=len(image)):
+            for plane in tqdm(range(n_slices)):
+                img_slice = take(image, plane, axis)
                 if type(img_slice) == da.core.Array:
                     img_slice = img_slice.compute()
+                img_slice = np.asarray(img_slice)
 
                 seg = engine.infer(img_slice)
                 if fill_holes:
@@ -442,8 +451,14 @@ class SliceInferenceWidget:
                 padh, padw = max_h - h, max_w - w
                 padded.append(np.pad(seg, ((0, padh), (0, padw))))
 
-            padded = np.stack(padded, axis=0)
-            return padded
+            # stack along a new leading axis, then move it back to the axis
+            # that was actually sliced so the output matches the input
+            # volume's original orientation/shape.
+            stacked = np.stack(padded, axis=0)
+            if axis != 0:
+                stacked = np.moveaxis(stacked, 0, axis)
+
+            return stacked
 
         elif image.ndim == 2:
             start = time()
@@ -651,7 +666,8 @@ def slice_inference_widget():
     scroll = QScrollArea()
     scroll.setWidget(widget._widget._qwidget)
     widget._widget._qwidget = scroll
-    
+
+    enable_layer_rename_refresh(widget)
     return widget
 
 
