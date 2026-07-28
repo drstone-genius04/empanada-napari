@@ -1,8 +1,9 @@
-import os, sys, yaml
+import os, sys, time, yaml
 import numpy as np
 import requests
 import torch
 from pathlib import Path
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 from empanada.config_loaders import read_yaml
@@ -78,6 +79,46 @@ def get_configs():
 
     return model_configs
 
+# Errors worth retrying: transient network/server hiccups (e.g. a 502/504
+# from a CDN edge), as opposed to e.g. a 404 for a genuinely missing file.
+_RETRYABLE_DOWNLOAD_ERRORS = (
+    urllib.error.URLError,  # covers HTTPError (502/504/etc.) too
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+
+def _download_with_retries(url, cached_file, max_retries=4, initial_backoff=2.0):
+    r"""Downloads a file via torch.hub, retrying transient network errors
+    (e.g. 502/504 gateway errors from a flaky CDN) with exponential backoff
+    before giving up.
+    """
+    hash_prefix = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with no_ssl_verification():
+                torch.hub.download_url_to_file(url, cached_file, hash_prefix, progress=True)
+            return
+        except _RETRYABLE_DOWNLOAD_ERRORS as exc:
+            # remove any partially-downloaded file so a retry starts fresh
+            if os.path.exists(cached_file):
+                try:
+                    os.remove(cached_file)
+                except OSError:
+                    pass
+
+            if attempt == max_retries:
+                raise
+
+            wait_s = initial_backoff * (2 ** (attempt - 1))
+            sys.stderr.write(
+                f'Download of "{url}" failed ({exc}); retrying in '
+                f'{wait_s:.0f}s (attempt {attempt}/{max_retries})...\n'
+            )
+            time.sleep(wait_s)
+
+
 def load_model_to_device(fpath_or_url, device):
     # check whether local file or url
     if os.path.isfile(fpath_or_url):
@@ -98,9 +139,7 @@ def load_model_to_device(fpath_or_url, device):
 
         if not os.path.exists(cached_file):
             sys.stderr.write('Downloading: "{}" to {}\n'.format(fpath_or_url, cached_file))
-            hash_prefix = None
-            with no_ssl_verification():
-                torch.hub.download_url_to_file(fpath_or_url, cached_file, hash_prefix, progress=True)
+            _download_with_retries(fpath_or_url, cached_file)
 
         model = torch.jit.load(cached_file, map_location=device)
 
