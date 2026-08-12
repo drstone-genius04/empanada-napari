@@ -17,3 +17,5 @@ imagehash
 mlflow
 simpleitk
 tqdm
+networkx
+pandas
